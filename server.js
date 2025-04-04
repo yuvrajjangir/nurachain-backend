@@ -4,7 +4,6 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const morgan = require('morgan');
-const corsMiddleware = require('./middleware/cors');
 
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/products');
@@ -14,25 +13,9 @@ const metricsRoutes = require('./routes/metrics');
 const app = express();
 
 // Middleware
-app.use(cors({
-  origin: '*', // Allow all origins
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-// Apply custom CORS middleware for handling preflight requests
-app.use(corsMiddleware);
+app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
-
-// Handle OPTIONS requests
-app.options('*', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.sendStatus(200);
-});
 
 // Routes
 app.use('/api/auth', authRoutes);
