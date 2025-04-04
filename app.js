@@ -22,13 +22,15 @@ app.use(cors({
     const allowedOrigins = [
       'http://localhost:3000',
       'https://nurachain-frontend.vercel.app',
+      'https://nurachain-frontend-j9qbcjkci-yuvrajjangirs-projects.vercel.app',
       // Add any other frontend domains here
     ];
     
     if(allowedOrigins.indexOf(origin) !== -1 || !origin) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      callback(null, true); // Temporarily allow all origins while debugging
+      // callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
