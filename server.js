@@ -15,25 +15,7 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl requests)
-    if(!origin) return callback(null, true);
-    
-    // Allow all origins in development or specific origins in production
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'https://nurachain-frontend.vercel.app',
-      'https://nurachain-frontend-j9qbcjkci-yuvrajjangirs-projects.vercel.app',
-      // Add any other frontend domains here
-    ];
-    
-    if(allowedOrigins.indexOf(origin) !== -1 || !origin) {
-      callback(null, true);
-    } else {
-      callback(null, true); // Temporarily allow all origins while debugging
-      // callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: '*', // Allow all origins
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -42,6 +24,15 @@ app.use(cors({
 app.use(corsMiddleware);
 app.use(express.json());
 app.use(morgan('dev'));
+
+// Handle OPTIONS requests
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.sendStatus(200);
+});
 
 // Routes
 app.use('/api/auth', authRoutes);
