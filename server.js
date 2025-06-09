@@ -10,7 +10,7 @@ dotenv.config();
 // Create Express app
 const app = express();
 
-/ Middleware
+// Middleware
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
