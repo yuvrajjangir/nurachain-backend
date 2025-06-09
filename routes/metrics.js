@@ -6,8 +6,8 @@ const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const { protect, restrictTo } = require('../middleware/auth');
 
-// Get dashboard metrics
-router.get('/dashboard', protect, async (req, res) => {
+// Root route - redirect to dashboard metrics
+router.get('/', protect, async (req, res) => {
   try {
     const userId = req.user._id;
     const role = req.user.role;
@@ -16,19 +16,19 @@ router.get('/dashboard', protect, async (req, res) => {
     const dashboardMetrics = await SystemMetric.getDashboardMetrics(userId, role);
     
     // Get key metrics counts
-    const pendingShipments = await Transaction.countDocuments({ 
+    const [pendingShipments, deliveredProducts, delayedShipments] = await Promise.all([
+      Transaction.countDocuments({ 
       status: { $in: ['pending', 'processing', 'in-transit'] } 
-    });
-    
-    const deliveredProducts = await Transaction.countDocuments({ 
+      }),
+      Transaction.countDocuments({ 
       status: 'delivered',
       'shipmentDetails.actualDelivery': { $exists: true }
-    });
-    
-    const delayedShipments = await Transaction.countDocuments({
+      }),
+      Transaction.countDocuments({
       status: { $in: ['in-transit', 'processing'] },
       'shipmentDetails.delays': { $exists: true, $not: { $size: 0 } }
-    });
+      })
+    ]);
     
     // Get recent transactions
     const recentTransactions = await Transaction.find()
@@ -51,19 +51,6 @@ router.get('/dashboard', protect, async (req, res) => {
       }
     ]);
     
-    // Get transaction status distribution
-    const transactionsByStatus = await Transaction.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 }
-        }
-      },
-      {
-        $sort: { count: -1 }
-      }
-    ]);
-    
     res.json({
       dashboardMetrics,
       keyMetrics: {
@@ -72,12 +59,184 @@ router.get('/dashboard', protect, async (req, res) => {
         delayedShipments
       },
       recentTransactions,
-      productsByCategory,
-      transactionsByStatus
+      productsByCategory
     });
   } catch (error) {
-    console.error('Error getting dashboard metrics:', error);
-    res.status(500).json({ message: 'Error getting dashboard metrics' });
+    console.error('Error getting metrics:', error);
+    res.status(500).json({ 
+      message: 'Error getting metrics',
+      error: error.message 
+    });
+  }
+});
+
+// Get role-specific dashboard metrics
+router.get('/dashboard', protect, async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    let statusFilter;
+    let transactionStatusFilter;
+
+    // Set status filter based on user role
+    switch (userRole) {
+      case 'manufacturer':
+        statusFilter = 'manufactured';
+        transactionStatusFilter = ['manufacturing', 'in-production'];
+        break;
+      case 'supplier':
+        statusFilter = 'in-supply';
+        transactionStatusFilter = ['supply-chain', 'in-supply', 'supply-transfer'];
+        break;
+      case 'distributor':
+        statusFilter = 'in-distribution';
+        transactionStatusFilter = ['distribution', 'in-distribution', 'distribution-transfer'];
+        break;
+      case 'customer':
+        statusFilter = 'delivered';
+        transactionStatusFilter = ['delivery', 'delivered', 'customer-received'];
+        break;
+      default:
+        statusFilter = null; // Admin sees all
+        transactionStatusFilter = null;
+    }
+
+    // Build base query
+    const query = statusFilter ? { status: statusFilter } : {};
+    const transactionQuery = transactionStatusFilter ? { status: { $in: transactionStatusFilter } } : {};
+
+    // Get total products for the role
+    const totalProducts = await Product.countDocuments(query);
+
+    // Get product status distribution
+    const productStatus = await Product.aggregate([
+      { $match: query },
+      { $group: { _id: '$status', count: { $sum: 1 } } }
+    ]);
+
+    // Get recent transactions based on role
+    const recentTransactions = await Transaction.find(transactionQuery)
+      .populate('product', 'name trackingNumber')
+      .populate('fromUser', 'username')
+      .populate('toUser', 'username')
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    // Calculate metrics based on role
+    let metrics = {
+      totalProducts,
+      productStatus,
+      recentTransactions,
+      delayedShipments: 0,
+      failedProducts: 0,
+      efficiency: 0,
+      qualityScore: 0,
+      supplyChainHealth: 0
+    };
+
+    // Add role-specific metrics
+    switch (userRole) {
+      case 'manufacturer':
+        metrics.failedProducts = await Product.countDocuments({ status: 'failed' });
+        metrics.qualityScore = 95;
+        metrics.efficiency = 88;
+        break;
+      case 'supplier':
+        metrics.delayedShipments = await Transaction.countDocuments({ 
+          ...transactionQuery,
+          'shipmentDetails.delays': { $exists: true, $ne: [] }
+        });
+        metrics.supplyChainHealth = 92;
+        metrics.qualityScore = 90;
+        break;
+      case 'distributor':
+        metrics.delayedShipments = await Transaction.countDocuments({ 
+          ...transactionQuery,
+          'shipmentDetails.delays': { $exists: true, $ne: [] }
+        });
+        metrics.efficiency = 85;
+        metrics.qualityScore = 88;
+        break;
+      case 'customer':
+        metrics.delayedShipments = await Transaction.countDocuments({ 
+          ...transactionQuery,
+          'shipmentDetails.delays': { $exists: true, $ne: [] }
+        });
+        metrics.qualityScore = 92;
+        metrics.efficiency = 90;
+        break;
+    }
+
+    // Get monthly activity with proper aggregation
+    const monthlyActivity = await Transaction.aggregate([
+      { 
+        $match: {
+          ...transactionQuery,
+          createdAt: { 
+            $gte: new Date(new Date().setMonth(new Date().getMonth() - 11)) 
+          }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' }
+          },
+          shipments: { $sum: 1 },
+          transactions: { $sum: 1 },
+          products: { $sum: { $ifNull: ['$quantity', 1] } }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          month: {
+            $concat: [
+              { $toString: '$_id.year' },
+              '-',
+              {
+                $cond: {
+                  if: { $lt: ['$_id.month', 10] },
+                  then: { $concat: ['0', { $toString: '$_id.month' }] },
+                  else: { $toString: '$_id.month' }
+                }
+              }
+            ]
+          },
+          shipments: 1,
+          transactions: 1,
+          products: 1
+        }
+      },
+      { $sort: { month: 1 } }
+    ]);
+
+    // Ensure we have data for all months in the last year
+    const last12Months = Array.from({ length: 12 }, (_, i) => {
+      const date = new Date();
+      date.setMonth(date.getMonth() - i);
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      return {
+        month: `${year}-${month}`,
+        shipments: 0,
+        transactions: 0,
+        products: 0
+      };
+    }).reverse();
+
+    // Merge actual data with empty months
+    const completeMonthlyActivity = last12Months.map(month => {
+      const existingData = monthlyActivity.find(d => d.month === month.month);
+      return existingData || month;
+    });
+
+    metrics.monthlyActivity = completeMonthlyActivity;
+
+    res.json(metrics);
+  } catch (error) {
+    console.error('Error fetching dashboard metrics:', error);
+    res.status(500).json({ message: 'Error fetching dashboard metrics', error: error.message });
   }
 });
 

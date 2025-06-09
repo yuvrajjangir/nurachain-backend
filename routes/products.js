@@ -1,9 +1,9 @@
 const express = require('express');
 const Product = require('../models/Product');
 const Transaction = require('../models/Transaction');
+const SystemMetric = require('../models/SystemMetric');
 const { protect, restrictTo } = require('../middleware/auth');
 const router = express.Router();
-const mockProducts = require('../data/mock/mockProducts');
 
 // Helper function to create transaction
 const createTransaction = async (product, fromUser, toUser, status, location) => {
@@ -44,126 +44,182 @@ const createTransaction = async (product, fromUser, toUser, status, location) =>
 // Get all products with filtering and pagination
 router.get('/', protect, async (req, res) => {
   try {
+    const {
+      category,
+      subCategory,
+      minStrength,
+      maxStrength,
+      finish,
+      sortBy,
+      sortOrder,
+      page = 1,
+      limit = 10
+    } = req.query;
+
+    // Build query
     const query = {};
     
-    // If user is not admin, only show products they own or have access to
-    if (req.user.role !== 'admin') {
-      query.$or = [
-        { manufacturer: req.user._id },
-        { currentOwner: req.user._id }
-      ];
+    // Role-based filtering
+    switch (req.user.role) {
+      case 'distributor':
+        // Distributors can see all products that are in-distribution
+        query.status = 'in-distribution';
+        break;
+      case 'supplier':
+        // Suppliers can see all products that are in-supply
+        query.status = 'in-supply';
+        break;
+      case 'customer':
+        // Customers can see all products that are delivered
+        query.status = 'delivered';
+        break;
+      case 'manufacturer':
+        // Manufacturers can see all products that are manufactured
+        query.status = 'manufactured';
+        break;
+      // Admin can see all products
+    }
+    
+    // Apply category filter
+    if (category) {
+      query.category = category;
     }
 
-    console.log('User ID:', req.user._id);
-    console.log('User Role:', req.user.role);
-    console.log('Query:', JSON.stringify(query));
+    // Apply subcategory filter
+    if (subCategory) {
+      query.subCategory = subCategory;
+    }
 
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+    // Apply strength filters
+    if (minStrength || maxStrength) {
+      query['specifications.mechanicalProperties'] = {};
 
-    // Build filter object
-    const filter = {};
-    if (req.query.category) filter.category = req.query.category;
-    if (req.query.subCategory) filter.subCategory = req.query.subCategory;
-    if (req.query.material) filter['specifications.material'] = req.query.material;
-    if (req.query.status) filter.status = req.query.status;
+      if (minStrength) {
+        query['specifications.mechanicalProperties.tensileStrength'] = { $gte: parseFloat(minStrength) };
+      }
 
-    // Try to get products from database
-    let products = [];
-    let total = 0;
-    
+      if (maxStrength) {
+        query['specifications.mechanicalProperties.tensileStrength'] = {
+          ...query['specifications.mechanicalProperties.tensileStrength'] || {},
+          $lte: parseFloat(maxStrength)
+        };
+      }
+    }
+
+    // Apply finish filter
+    if (finish) {
+      query['specifications.finish'] = finish;
+    }
+
+    // Build sort options
+    const sortOptions = {};
+    if (sortBy) {
+      sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    } else {
+      sortOptions.createdAt = -1; // Default sort by newest
+    }
+
+    // Calculate pagination
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Execute query
+    const products = await Product.find(query)
+      .populate('manufacturer', 'username company')
+      .populate('currentOwner', 'username company')
+      .sort(sortOptions)
+      .skip(skip)
+      .limit(parseInt(limit));
+      
+    // Get total count for pagination
+    const totalProducts = await Product.countDocuments(query);
+
+    // Record metric for product search
     try {
-      products = await Product.find({ ...query, ...filter })
-        .populate('manufacturer', 'username company')
-        .populate('currentOwner', 'username company')
-        .sort('-createdAt')
-        .skip(skip)
-        .limit(limit);
-      
-      total = await Product.countDocuments({ ...query, ...filter });
-    } catch (error) {
-      console.warn('Error fetching from database, using mock data', error);
-    }
-    
-    // If no products in database, use mock data
-    if (products.length === 0) {
-      // Apply filters to mock data
-      let filteredProducts = [...mockProducts];
-      
-      if (req.query.category) {
-        filteredProducts = filteredProducts.filter(p => 
-          p.category.toLowerCase() === req.query.category.toLowerCase());
-      }
-      
-      if (req.query.status) {
-        filteredProducts = filteredProducts.filter(p => 
-          p.status.toLowerCase() === req.query.status.toLowerCase());
-      }
-      
-      if (req.query.material) {
-        filteredProducts = filteredProducts.filter(p => 
-          p.specifications.material.toLowerCase().includes(req.query.material.toLowerCase()));
-      }
-      
-      total = filteredProducts.length;
-      products = filteredProducts.slice(skip, skip + limit);
+      await SystemMetric.recordMetric({
+        type: 'inventory_metrics',
+        name: 'product_search',
+        value: products.length,
+        metadata: {
+          category: category || 'all',
+          subCategory: subCategory,
+          filters: Object.keys(query).length,
+          userId: req.user._id,
+          role: req.user.role
+        },
+        source: 'product_api'
+      });
+    } catch (metricError) {
+      console.warn('Error recording product search metric:', metricError);
     }
 
-    console.log('Found Products:', products);
-
-    // If no products found in DB, return empty array
-    if (!products || products.length === 0) {
-      console.log('No products found');
-      return res.json([]);
-    }
-
-    // Return the products array
-    return res.json({
+    res.json({
       products,
-      page,
-      pages: Math.ceil(total / limit),
-      total
+      pagination: {
+        total: totalProducts,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(totalProducts / parseInt(limit))
+      }
     });
   } catch (error) {
     console.error('Error fetching products:', error);
-    // Always return an array, even on error
-    return res.status(500).json({ 
-      message: 'Error fetching products',
-      products: [] 
-    });
+    res.status(500).json({ message: 'Error fetching products', error: error.message });
   }
 });
 
-// Get categories and subcategories
+// Get product categories and subcategories
 router.get('/categories', protect, async (req, res) => {
   try {
-    // Try to get from database first
-    let categories = [];
-    let subCategories = [];
-    let materials = [];
+    const categories = await Product.aggregate([
+      {
+        $group: {
+          _id: {
+            category: '$category',
+            subCategory: '$subCategory'
+          },
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $group: {
+          _id: '$_id.category',
+          subCategories: {
+            $push: {
+              name: '$_id.subCategory',
+              count: '$count'
+            }
+          },
+          totalCount: { $sum: '$count' }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          category: '$_id',
+          subCategories: 1,
+          totalCount: 1
+        }
+      },
+      {
+        $sort: { totalCount: -1 }
+      }
+    ]);
     
-    try {
-      categories = await Product.distinct('category');
-      subCategories = await Product.distinct('subCategory');
-      materials = await Product.distinct('specifications.material');
+    res.json(categories);
     } catch (error) {
-      console.warn('Error fetching categories from database', error);
-    }
-    
-    // If no categories in database, use mock data
-    if (categories.length === 0) {
-      categories = [...new Set(mockProducts.map(p => p.category))];
-      materials = [...new Set(mockProducts.map(p => p.specifications.material))];
-    }
-    
-    res.json({
-      categories,
-      subCategories,
-      materials
-    });
+    console.error('Error fetching product categories:', error);
+    res.status(500).json({ message: 'Error fetching product categories' });
+  }
+});
+
+// Get available materials
+router.get('/materials', protect, async (req, res) => {
+  try {
+    const materials = await Product.distinct('specifications.material');
+    res.json(materials);
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    console.error('Error fetching materials:', error);
+    res.status(500).json({ message: 'Error fetching materials' });
   }
 });
 
@@ -208,26 +264,9 @@ router.get('/track/:trackingNumber', protect, async (req, res) => {
 // Get product by ID
 router.get('/:id', protect, async (req, res) => {
   try {
-    // First try to find in database
-    let product = null;
-    
-    try {
-      product = await Product.findById(req.params.id)
+    const product = await Product.findById(req.params.id)
         .populate('manufacturer', 'username company')
         .populate('currentOwner', 'username company');
-    } catch (error) {
-      console.warn('Error fetching product from database', error);
-    }
-    
-    // If not found in database, check mock data
-    if (!product) {
-      product = mockProducts.find(p => p.id === req.params.id);
-      
-      // If still not found but matches old mock data ID, use that
-      if (!product && req.params.id === 'p1' && mockProducts.length > 0) {
-        product = mockProducts[0];
-      }
-    }
     
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
@@ -235,17 +274,7 @@ router.get('/:id', protect, async (req, res) => {
     
     res.json(product);
   } catch (error) {
-    // If error is because ID format is invalid, check mock data
-    const mockProduct = mockProducts.find(p => p.id === req.params.id);
-    if (mockProduct) {
-      return res.json(mockProduct);
-    }
-    
-    // If still not found but matches old mock data ID, use that
-    if (req.params.id === 'p1' && mockProducts.length > 0) {
-      return res.json(mockProducts[0]);
-    }
-    
+    console.error('Error fetching product:', error);
     res.status(400).json({ message: error.message });
   }
 });
@@ -310,10 +339,10 @@ router.patch('/:id/status', protect, restrictTo('supplier', 'distributor', 'qual
     const allowedTransitions = {
       'supplier': {
         'manufactured': ['in-supply'],
-        'quality-check': ['in-supply'] // Keep this for backward compatibility
+        'quality-check': ['in-supply']
       },
       'quality-inspector': {
-        'quality-check': ['manufactured', 'in-supply'] // Keep for backward compatibility
+        'quality-check': ['manufactured', 'in-supply']
       },
       'distributor': {
         'in-supply': ['in-distribution'],
@@ -364,7 +393,7 @@ router.patch('/:id/status', protect, restrictTo('supplier', 'distributor', 'qual
       title: `Status Updated: ${status}`,
       date: new Date(),
       location,
-      handler: req.user.username,
+      handler: req.user._id,
       description: notes || `Product status updated to ${status}`
     });
     
@@ -400,7 +429,7 @@ router.post('/:id/quality-check', protect, restrictTo('supplier', 'quality-inspe
       title: `Quality Check: Passed`,
       date: new Date(),
       location: product.currentLocation,
-      handler: req.user.username,
+      handler: req.user._id,
       description: notes,
       metadata: checkDetails
     });
@@ -444,7 +473,7 @@ router.post('/:id/transfer', protect, restrictTo('supplier', 'distributor', 'adm
       title: 'Ownership Transferred',
       date: new Date(),
       location,
-      handler: req.user.username,
+      handler: req.user._id,
       description: notes || 'Product ownership transferred',
       metadata: {
         fromUser: previousOwner,

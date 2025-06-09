@@ -121,7 +121,10 @@ const productSchema = new mongoose.Schema({
       default: Date.now
     },
     location: String,
-    handler: String,
+    handler: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
     description: String,
     metadata: mongoose.Schema.Types.Mixed
   }],
@@ -157,8 +160,8 @@ productSchema.index({ status: 1 });
 productSchema.index({ manufacturer: 1 });
 productSchema.index({ batchNumber: 1 });
 
-// Generate tracking number before saving
-productSchema.pre('save', function(next) {
+// Generate tracking number before validation
+productSchema.pre('validate', function(next) {
   if (!this.trackingNumber) {
     // Generate tracking number based on category
     const prefix = this.category === 'Fasteners' ? 'FAS' :
